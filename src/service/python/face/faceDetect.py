@@ -4,6 +4,9 @@ import requests
 import onnxruntime as ort
 import time
 from io import BytesIO
+import mmap
+import struct
+import os
 
 # 定义视频流大小和通道
 WIDTH = 320
@@ -11,7 +14,7 @@ HEIGHT = 240
 CHANNELS = 3
 
 # 加载预训练的模型
-model_path = 'models/version-slim-320.onnx'
+model_path = '/home/code/main/src/service/python/face/models/version-slim-320.onnx'
 session = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
 input_name = session.get_inputs()[0].name
 output_names = [session.get_outputs()[0].name, session.get_outputs()[1].name]
@@ -32,6 +35,13 @@ def postprocess(scores, boxes, threshold=0.8):
     return tuple(avg_box)
 
 def main():
+    # 创建或打开共享内存
+    shm_fd = os.open('/dev/shm/best_box', os.O_CREAT | os.O_RDWR)
+    assert shm_fd != -1
+    # 分配足够存储四个浮点数的内存空间
+    os.ftruncate(shm_fd, 32)
+    mm = mmap.mmap(shm_fd, 32, mmap.MAP_SHARED, mmap.PROT_WRITE)
+
     snapshot_url = 'http://192.168.179.146:8080/?action=snapshot'
     
     try:
@@ -62,15 +72,23 @@ def main():
             best_box = postprocess(scores, boxes)
 
             if best_box:
-                print("Best box (x1, y1, x2, y2):", best_box)
+                # 将结果写入共享内存
+                mm.seek(0)
+                mm.write(struct.pack('4f', *best_box))
             else:
-                print("No detection")
+                # 若无有效结果，则写入无效值
+                mm.seek(0)
+                mm.write(struct.pack('4f', -1.0, -1.0, -1.0, -1.0))
 
             end_time = time.time()
             process_duration = (end_time - start_time) * 1000
             sleep_time = max(0, 200 - process_duration)
             time.sleep(sleep_time / 1000)
     finally:
+        # 清理资源
+        mm.close()
+        os.close(shm_fd)
+        os.unlink('/tmp/best_box')
         print("Releasing resources")
 
 if __name__ == "__main__":
