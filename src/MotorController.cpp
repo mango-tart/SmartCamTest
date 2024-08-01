@@ -1,4 +1,4 @@
-#include "MotorController.h"
+#include "MotorController.hpp"
 
 // Define the motor sequences as static constants within the class
 const int MotorController::sequence[8][4] = {
