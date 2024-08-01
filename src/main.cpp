@@ -18,18 +18,24 @@
 
 std::atomic<bool> running(true);
 std::atomic<bool> newFrameForFaceDetectThread(false);
-std::atomic<bool> newDataAvailable(false); // Fixing undeclared variable
+std::atomic<bool> newDataAvailable(false);
 std::atomic<bool> faceDetectRunning(false);
+std::atomic<int> motorControlMode(0); // 0: 休眠, 1: 自动追踪, 2: 手动控制
+std::atomic<bool> upButtonPressed(false);
+std::atomic<bool> downButtonPressed(false);
+std::atomic<bool> leftButtonPressed(false);
+std::atomic<bool> rightButtonPressed(false);
+
 std::thread faceDetectThread;
 MotorController xController = MotorController::selectMotor(false);
 MotorController yController = MotorController::selectMotor(true);
 sem_t* sem_newFrame;
 sem_t* sem_processedFrame;
-float* detectedBox; // Pointer to shared memory for face detection result
-int cam_shm_fd; // File descriptor for camera frame shared memory
+float* detectedBox;
+int cam_shm_fd;
 float faceLocationX = 0.0;
 float faceLocationY = 0.0;
-void* cam_shm_base; // Base pointer for camera frame shared memory
+void* cam_shm_base;
 int xStep = 0;
 int yStep = 0;
 
@@ -73,7 +79,6 @@ void cleanupSemaphores() {
 }
 
 void initSharedMemory() {
-    // Camera frame shared memory
     cam_shm_fd = shm_open("/cam_frame", O_CREAT | O_RDWR, 0666);
     ftruncate(cam_shm_fd, 320 * 240 * 3);
     cam_shm_base = mmap(NULL, 320 * 240 * 3, PROT_READ | PROT_WRITE, MAP_SHARED, cam_shm_fd, 0);
@@ -108,7 +113,7 @@ void getCamFrame() {
     curl_easy_setopt(curl, CURLOPT_URL, "http://localhost:8080/?action=snapshot");
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
     std::string readBuffer;
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);  // Ensuring the data is written to readBuffer
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
 
     while (running) {
         readBuffer.clear();
@@ -119,7 +124,7 @@ void getCamFrame() {
             if (!img.empty()) {
                 cv::resize(img, img, cv::Size(320, 240), 0, 0, cv::INTER_NEAREST);
                 memcpy(cam_shm_base, img.data, 320 * 240 * 3);
-                newFrameForFaceDetectThread = true; // Set flag for new frame available
+                newFrameForFaceDetectThread = true;
             } else {
                 std::cerr << "Failed to decode the image." << std::endl;
             }
@@ -141,7 +146,6 @@ void faceDetectionTask() {
             std::vector<FaceInfo> face_info;
             ultraface.detect(frame, face_info);
 
-            // 查找最宽的人脸识别框
             float max_width = 0;
             FaceInfo largest_face;
             for (auto &face : face_info) {
@@ -153,13 +157,11 @@ void faceDetectionTask() {
             }
 
             if (max_width > 0) {
-                // 计算中心点并归一化
                 faceLocationX = (largest_face.x1 + largest_face.x2) / 640.0;
                 faceLocationY = (largest_face.y1 + largest_face.y2) / 480.0;
                 newDataAvailable = true;
             }
-        }
-        else{
+        } else {
             usleep(10000);
         }
     }
@@ -167,21 +169,47 @@ void faceDetectionTask() {
 
 void motorControlTask(PIDController& pidX, PIDController& pidY) {
     while (running) {
-        if (newDataAvailable) {
-            newDataAvailable = false;
-            float errorX = (abs(faceLocationX - 0.5) > 0.04) * (faceLocationX - 0.5);
-            float errorY = (abs(faceLocationY - 0.5) > 0.04) * (faceLocationY - 0.5) * 0.75;
-            float controlX = pidX.compute(errorX);
-            float controlY = pidY.compute(errorY);
-            int delayX = abs(1000.0 / controlX);
-            int delayY = abs(1000.0 / controlY);
-            std::thread xMotorThread(&MotorController::rotateMotorForTime, &xController, 198-delayX/1000, delayX, (controlX<0));
-            std::thread yMotorThread(&MotorController::rotateMotorForTime, &yController, 198-delayY/1000, delayY, (controlY<0));
-            xMotorThread.detach();
-            yMotorThread.detach();
+        if (motorControlMode == 0) {
+
+        } else if (motorControlMode == 1) {
+            if (newDataAvailable) {
+                newDataAvailable = false;
+                float errorX = (abs(faceLocationX - 0.5) > 0.04) * (faceLocationX - 0.5);
+                float errorY = (abs(faceLocationY - 0.5) > 0.04) * (faceLocationY - 0.5) * 0.75;
+                float controlX = pidX.compute(errorX);
+                float controlY = pidY.compute(errorY);
+                int delayX = abs(1000.0 / controlX);
+                int delayY = abs(1000.0 / controlY);
+                std::thread xMotorThread(&MotorController::rotateMotorForTime, &xController, 198-delayX/1000, delayX, (controlX<0));
+                std::thread yMotorThread(&MotorController::rotateMotorForTime, &yController, 198-delayY/1000, delayY, (controlY<0));
+                xMotorThread.detach();
+                yMotorThread.detach();
+            }
+        } else if (motorControlMode == 2) {
+            if (upButtonPressed) {
+                upButtonPressed = false;
+                std::thread yMotorThread(&MotorController::rotateMotorForTime, &yController, 195, 2000, true);
+                yMotorThread.detach();
+            } else if (downButtonPressed) {
+                downButtonPressed = false;
+                std::thread yMotorThread(&MotorController::rotateMotorForTime, &yController, 195, 2000, false);
+                yMotorThread.detach();
+            } else if (leftButtonPressed) {
+                leftButtonPressed = false;
+                std::thread xMotorThread(&MotorController::rotateMotorForTime, &xController, 195, 2000, true);
+                xMotorThread.detach();
+            } else if (rightButtonPressed) {
+                rightButtonPressed = false;
+                std::thread xMotorThread(&MotorController::rotateMotorForTime, &xController, 195, 2000, false);
+                xMotorThread.detach();
+            }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
+}
+
+void setMotorControlMode(int mode) {
+    motorControlMode = mode;
 }
 
 void startDrogon() {
@@ -216,6 +244,30 @@ void startDrogon() {
             callback(resp);
         }
     });
+    drogon::app().registerHandler("/drogon/set_motor_mode", [](const drogon::HttpRequestPtr& req,
+                                                               std::function<void (const drogon::HttpResponsePtr &)> &&callback) {
+        auto json = req->getJsonObject();
+        if (json) {
+            int mode = (*json)["mode"].asInt();
+            setMotorControlMode(mode);
+            auto resp = drogon::HttpResponse::newHttpResponse();
+            resp->setBody("Motor control mode set.");
+            callback(resp);
+        }
+    });
+    drogon::app().registerHandler("/drogon/set_button_state", [](const drogon::HttpRequestPtr& req,
+                                                            std::function<void (const drogon::HttpResponsePtr &)> &&callback) {
+        auto json = req->getJsonObject();
+        if (json) {
+            upButtonPressed = (*json)["up"].asBool();
+            downButtonPressed = (*json)["down"].asBool();
+            leftButtonPressed = (*json)["left"].asBool();
+            rightButtonPressed = (*json)["right"].asBool();
+            auto resp = drogon::HttpResponse::newHttpResponse();
+            resp->setBody("Button state updated.");
+            callback(resp);
+        }
+    });
     drogon::app().run();
 }
 
@@ -227,9 +279,8 @@ int main() {
     PIDController pidX(1.5, 0.0025, 0.0025);
     PIDController pidY(1.5, 0.0025, 0.0025);
 
-    resetMotor(xController, yController, xStep, yStep); // Ensure motors are reset at startup
+    resetMotor(xController, yController, xStep, yStep);
 
-    // 启动 Drogon 应用程序在单独的线程中运行
     std::thread drogonThread(startDrogon);
     std::thread camFrameThread(getCamFrame);
     std::thread motorControlThread(motorControlTask, std::ref(pidX), std::ref(pidY));
